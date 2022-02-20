@@ -6,14 +6,37 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/docopt/docopt-go"
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/reconquest/karma-go"
 	"github.com/reconquest/pkg/log"
 	telebot "gopkg.in/telebot.v3"
+)
+
+type User struct {
+	UserID      int64 `bson:"user_id"`
+	LastMessage int64 `bson:"last_message"`
+}
+
+var (
+	version = "[manual build]"
+	usage   = "telekick " + version + `
+
+Usage:
+  telekick [options]
+  telekick -h | --help
+  telekick --version
+
+Options:
+  -S --stats  Show stats.
+  -h --help   Show this screen.
+  --version   Show version.
+`
 )
 
 type Watcher struct {
@@ -24,6 +47,11 @@ type Watcher struct {
 }
 
 func main() {
+	args, err := docopt.Parse(usage, nil, true, version, false)
+	if err != nil {
+		panic(err)
+	}
+
 	var (
 		telegramToken = stringEnv("TELEGRAM_TOKEN")
 		telegramChat  = intEnv("TELEGRAM_CHAT")
@@ -54,6 +82,16 @@ func main() {
 		duration: duration,
 	}
 
+	if mode, _ := args["--stats"].(bool); mode {
+		entries, err := watcher.listTimestamps()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Print(entries)
+		return
+	}
+
 	go watcher.Record()
 	go watcher.WatchKick()
 
@@ -70,9 +108,48 @@ func main() {
 	<-signals
 }
 
+func (watcher *Watcher) listTimestamps() (string, error) {
+	var users []User
+	err := watcher.store.Find(bson.M{}).Sort("last_message").All(&users)
+	if err != nil {
+		return "", err
+	}
+
+	entries := []string{}
+	for _, user := range users {
+		chat, err := watcher.bot.ChatByID(user.UserID)
+		if err != nil {
+			log.Errorf(err, "chat by id: %v", user.UserID)
+			continue
+		}
+
+		timestamp := time.Unix(user.LastMessage, 0)
+
+		entries = append(
+			entries,
+			"@"+chat.Username+" "+
+				chat.FirstName+" "+
+				chat.LastName+" "+
+				time.Now().Sub(timestamp).String(),
+		)
+	}
+
+	return strings.Join(entries, "\n"), nil
+}
+
 func (watcher *Watcher) handle(update telebot.Update) error {
 	if update.Message == nil {
 		return nil
+	}
+
+	if update.Message.Text == "/when" || update.Message.Text == "q" {
+		entries, err := watcher.listTimestamps()
+		if err != nil {
+			return err
+		}
+
+		_, err = watcher.bot.Send(update.Message.Sender, entries)
+		return err
 	}
 
 	if update.Message.UserLeft != nil {
@@ -126,6 +203,16 @@ func (watcher *Watcher) Record() {
 
 	go watcher.bot.Poller.Poll(watcher.bot, updates, stop)
 
+	err := watcher.bot.SetCommands(
+		telebot.Command{
+			Text:        "/when",
+			Description: "Show the list of users and number of hours since their last message",
+		},
+	)
+	if err != nil {
+		log.Fatalf(err, "set commands")
+	}
+
 	for update := range updates {
 		watcher.handle(update)
 	}
@@ -136,9 +223,6 @@ func (watcher *Watcher) Record() {
 func (watcher *Watcher) WatchKick() {
 	interval := time.Hour
 
-	type User struct {
-		UserID int64 `bson:"user_id"`
-	}
 	for {
 		since, err := watcher.store.Find(bson.M{
 			"last_message": bson.M{

@@ -3,6 +3,7 @@ module github.com/kovetskiy/telekick
 go 1.17
 
 require (
+	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/globalsign/mgo v0.0.0-20181015135952-eeefdecb41b8
 	github.com/reconquest/karma-go v0.0.0-20200326104714-79480464fdb5
 	github.com/reconquest/pkg v0.0.0-20201112120128-927c6794df56
